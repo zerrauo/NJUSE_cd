@@ -8,7 +8,7 @@ class AverageWordLengthTest(unittest.TestCase):
         self.assertEqual(average_word_length("hi world"), 3.5)
 
     def test_ignores_extra_whitespace(self):
-        self.assertEqual(average_word_length("  a   bee  ccc "), 2.0)
+        self.assertAlmostEqual(average_word_length("  a   bee  ccc "), 7 / 3)
 
     def test_empty_text_returns_zero(self):
         self.assertEqual(average_word_length("   "), 0.0)

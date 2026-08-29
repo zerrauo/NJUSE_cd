@@ -1,6 +1,5 @@
 # 演示任务
 
-`text_stats.average_word_length` 的实现存在缺陷。
+`text_stats.average_word_length` 的实现存在缺陷。这里的平均值指**算术平均值**：所有单词长度之和除以单词数量。
 
 请定位问题，修复实现，并运行测试确认所有测试通过。不要修改测试文件。
-
