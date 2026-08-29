@@ -1,0 +1,62 @@
+"""The explicit agent loop: model decision -> local action -> observation."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+from typing import Any, Protocol
+
+from .tools import LocalTools, TOOL_SCHEMAS
+
+SYSTEM_PROMPT = """你是一个谨慎的编程助手。只在用户指定工作区内工作。先检查相关文件，再做最小修改，并运行合适的验证命令。不要声称未验证的结果。任务完成时简洁汇报修改和验证结果。"""
+
+
+class CompletionClient(Protocol):
+    def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]: ...
+
+
+@dataclass
+class AgentResult:
+    status: str
+    message: str
+    turns: int
+
+
+class Agent:
+    def __init__(self, client: CompletionClient, tools: LocalTools, max_turns: int = 12, max_history_messages: int = 60) -> None:
+        self.client = client
+        self.tools = tools
+        self.max_turns = max_turns
+        self.max_history_messages = max_history_messages
+
+    def run(self, task: str) -> AgentResult:
+        messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task}]
+        for turn in range(1, self.max_turns + 1):
+            self._trim_history(messages)
+            try:
+                assistant = self.client.complete(messages, TOOL_SCHEMAS)
+            except RuntimeError as exc:
+                return AgentResult("model_error", str(exc), turn)
+            messages.append(assistant)
+            calls = assistant.get("tool_calls") or []
+            if not calls:
+                return AgentResult("completed", assistant.get("content") or "任务已结束。", turn)
+            for call in calls:
+                function = call.get("function", {})
+                try:
+                    arguments = json.loads(function.get("arguments", "{}"))
+                    if not isinstance(arguments, dict):
+                        raise ValueError("工具参数必须是 JSON 对象")
+                except (json.JSONDecodeError, ValueError) as exc:
+                    result = json.dumps({"ok": False, "error": f"工具参数解析失败: {exc}"}, ensure_ascii=False)
+                else:
+                    result = self.tools.execute(function.get("name", ""), arguments)
+                messages.append({"role": "tool", "tool_call_id": call.get("id", "unknown"), "content": result})
+        return AgentResult("max_turns", f"达到最大执行轮数（{self.max_turns}），已停止以避免无限循环。", self.max_turns)
+
+    def _trim_history(self, messages: list[dict[str, Any]]) -> None:
+        """Keep the system prompt and newest observations within a bounded context."""
+        overflow = len(messages) - self.max_history_messages
+        if overflow > 0:
+            del messages[1 : 1 + overflow]
+
