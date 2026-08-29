@@ -7,7 +7,7 @@
 - OpenAI 兼容的 Chat Completions + Tool Calling 客户端；
 - 自实现的 Agent 循环、消息历史裁剪、最大轮数停止条件；
 - 本地 `list_files`、`read_file`、`write_file`、`run_command` 工具；
-- 路径越界、危险命令、超时和工具异常的基础防护。
+- 路径越界、敏感文件、危险命令、超时和工具异常的基础防护；命令默认仅允许常见测试/构建程序，`--allow-unsafe-commands` 才会放宽该限制。
 
 ## 运行
 

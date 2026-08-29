@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 from typing import Any
 
@@ -13,7 +14,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {"type": "function", "function": {"name": "list_files", "description": "列出工作区中匹配的文件。", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "相对工作区的目录，默认 ."}}, "required": []}}},
     {"type": "function", "function": {"name": "read_file", "description": "读取工作区内的 UTF-8 文本文件。", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "相对工作区的文件路径"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "write_file", "description": "创建或完全覆盖工作区内的 UTF-8 文本文件。", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-    {"type": "function", "function": {"name": "run_command", "description": "在工作区内运行开发命令并返回输出。危险命令会被拒绝。", "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 60}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "run_command", "description": "在工作区内运行测试或构建命令并返回输出。默认仅允许常见开发命令，危险命令会被拒绝。", "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 60}}, "required": ["command"]}}},
 ]
 
 
@@ -22,11 +23,14 @@ class LocalTools:
 
     MAX_FILE_BYTES = 100_000
     BLOCKED_COMMANDS = {"sudo", "shutdown", "reboot", "mkfs", "dd", "git push"}
+    SAFE_EXECUTABLES = {"python", "python3", "pytest", "npm", "go", "cargo", "mvn", "gradle", "./gradlew", "./mvnw"}
+    SHELL_OPERATORS = {"|", "||", "&&", ";", ">", ">>", "<", "<<"}
     SENSITIVE_FILE_NAMES = {".env", ".ssh", "id_rsa", "id_ed25519", "credentials"}
     SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, allow_unsafe_commands: bool = False) -> None:
         self.workspace = workspace.resolve()
+        self.allow_unsafe_commands = allow_unsafe_commands
         if not self.workspace.is_dir():
             raise ValueError(f"工作区不存在或不是目录: {workspace}")
 
@@ -37,7 +41,9 @@ class LocalTools:
             return self._error(f"未知工具: {name}")
         try:
             return handler(arguments)
-        except (OSError, ValueError, UnicodeDecodeError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired:
+            return self._error("命令执行超时")
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
             return self._error(str(exc))
 
     def _resolve(self, raw_path: str) -> Path:
@@ -106,12 +112,19 @@ class LocalTools:
         secret_markers = (".env", ".ssh", "id_rsa", "id_ed25519", "credentials", ".pem", ".key", "printenv", " env", "echo $")
         if any(blocked in normalized for blocked in self.BLOCKED_COMMANDS) or "rm -rf" in normalized or any(marker in normalized for marker in secret_markers):
             raise ValueError("命令被安全策略拒绝")
+        command_parts = shlex.split(command)
+        if not command_parts:
+            raise ValueError("命令不能为空")
+        if any(part in self.SHELL_OPERATORS for part in command_parts):
+            raise ValueError("默认策略不支持管道、重定向等 shell 语法")
+        if not self.allow_unsafe_commands and command_parts[0] not in self.SAFE_EXECUTABLES:
+            raise ValueError(f"默认策略只允许测试或构建命令；如确有需要，请使用 --allow-unsafe-commands：{command_parts[0]}")
         timeout = args.get("timeout_seconds", 30)
         if not isinstance(timeout, int) or not 1 <= timeout <= 60:
             raise ValueError("timeout_seconds 必须是 1 到 60 的整数")
         completed = subprocess.run(
-            command,
-            shell=True,
+            command_parts,
+            shell=False,
             cwd=self.workspace,
             text=True,
             capture_output=True,
