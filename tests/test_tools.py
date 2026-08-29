@@ -27,3 +27,10 @@ class LocalToolsTest(unittest.TestCase):
     def test_path_escape_and_dangerous_commands_are_rejected(self):
         self.assertFalse(unpack(self.tools.execute("read_file", {"path": "../secret.txt"}))["ok"])
         self.assertFalse(unpack(self.tools.execute("run_command", {"command": "rm -rf /tmp/not-real"}))["ok"])
+
+    def test_credentials_are_hidden_from_every_tool(self):
+        Path(self.directory.name, ".env").write_text("CODING_AGENT_API_KEY=do-not-leak")
+        self.assertNotIn(".env", unpack(self.tools.execute("list_files", {"path": "."}))["files"])
+        self.assertFalse(unpack(self.tools.execute("read_file", {"path": ".env"}))["ok"])
+        self.assertFalse(unpack(self.tools.execute("write_file", {"path": ".env", "content": "changed"}))["ok"])
+        self.assertFalse(unpack(self.tools.execute("run_command", {"command": "cat .env"}))["ok"])

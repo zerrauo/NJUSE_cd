@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -21,6 +22,8 @@ class LocalTools:
 
     MAX_FILE_BYTES = 100_000
     BLOCKED_COMMANDS = {"sudo", "shutdown", "reboot", "mkfs", "dd", "git push"}
+    SENSITIVE_FILE_NAMES = {".env", ".ssh", "id_rsa", "id_ed25519", "credentials"}
+    SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
 
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace.resolve()
@@ -34,14 +37,34 @@ class LocalTools:
             return self._error(f"未知工具: {name}")
         try:
             return handler(arguments)
-        except (OSError, ValueError, UnicodeDecodeError) as exc:
+        except (OSError, ValueError, UnicodeDecodeError, subprocess.TimeoutExpired) as exc:
             return self._error(str(exc))
 
     def _resolve(self, raw_path: str) -> Path:
         candidate = (self.workspace / raw_path).resolve()
         if candidate != self.workspace and self.workspace not in candidate.parents:
             raise ValueError("拒绝访问工作区以外的路径")
+        self._assert_not_sensitive(candidate)
         return candidate
+
+    def _assert_not_sensitive(self, candidate: Path) -> None:
+        """Keep credentials outside the model's observable file system."""
+        if candidate == self.workspace:
+            return
+        for part in candidate.relative_to(self.workspace).parts:
+            lowered = part.lower()
+            if lowered in self.SENSITIVE_FILE_NAMES or any(lowered.endswith(suffix) for suffix in self.SENSITIVE_SUFFIXES):
+                raise ValueError("拒绝访问可能包含凭据的文件或目录")
+
+    @classmethod
+    def _is_sensitive(cls, candidate: Path, workspace: Path) -> bool:
+        if candidate == workspace:
+            return False
+        for part in candidate.relative_to(workspace).parts:
+            lowered = part.lower()
+            if lowered in cls.SENSITIVE_FILE_NAMES or any(lowered.endswith(suffix) for suffix in cls.SENSITIVE_SUFFIXES):
+                return True
+        return False
 
     def _list_files(self, args: dict[str, Any]) -> str:
         target = self._resolve(args.get("path", "."))
@@ -49,6 +72,8 @@ class LocalTools:
             raise ValueError("指定路径不是目录")
         entries = []
         for path in sorted(target.iterdir()):
+            if self._is_sensitive(path, self.workspace):
+                continue
             relative = path.relative_to(self.workspace)
             entries.append(f"{relative}{'/' if path.is_dir() else ''}")
             if len(entries) >= 200:
@@ -78,13 +103,21 @@ class LocalTools:
     def _run_command(self, args: dict[str, Any]) -> str:
         command = self._required_string(args, "command")
         normalized = command.lower().strip()
-        if any(blocked in normalized for blocked in self.BLOCKED_COMMANDS) or "rm -rf" in normalized:
+        secret_markers = (".env", ".ssh", "id_rsa", "id_ed25519", "credentials", ".pem", ".key", "printenv", " env", "echo $")
+        if any(blocked in normalized for blocked in self.BLOCKED_COMMANDS) or "rm -rf" in normalized or any(marker in normalized for marker in secret_markers):
             raise ValueError("命令被安全策略拒绝")
         timeout = args.get("timeout_seconds", 30)
         if not isinstance(timeout, int) or not 1 <= timeout <= 60:
             raise ValueError("timeout_seconds 必须是 1 到 60 的整数")
         completed = subprocess.run(
-            command, shell=True, cwd=self.workspace, text=True, capture_output=True, timeout=timeout
+            command,
+            shell=True,
+            cwd=self.workspace,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            # Do not pass API keys or other parent-process variables to tools.
+            env={"PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8"},
         )
         output = (completed.stdout + completed.stderr)[-12_000:]
         return self._ok({"exit_code": completed.returncode, "output": output, "truncated": len(completed.stdout + completed.stderr) > 12_000})
